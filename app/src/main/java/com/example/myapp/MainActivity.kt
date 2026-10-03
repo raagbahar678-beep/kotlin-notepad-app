@@ -1406,9 +1406,9 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
         if (ev.actionMasked == MotionEvent.ACTION_SCROLL) {
             val v = ev.getAxisValue(MotionEvent.AXIS_VSCROLL)
             val h = ev.getAxisValue(MotionEvent.AXIS_HSCROLL)
-            if (ev.isCtrlPressed) {
+            if ((ev.metaState and KeyEvent.META_CTRL_ON) != 0) {
                 if (v > 0f) app.zoomBy(1) else if (v < 0f) app.zoomBy(-1)
-            } else if (ev.isShiftPressed) {
+            } else if ((ev.metaState and KeyEvent.META_SHIFT_ON) != 0) {
                 hx = maxOf(0f, hx - v * dpf(40f))
                 invalidate()
             } else {
