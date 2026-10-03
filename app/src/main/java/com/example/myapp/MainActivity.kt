@@ -1789,7 +1789,7 @@ class Pane(val app: MainActivity, val id: Int) {
         app.sessionDirty = true
     }
 
-    fun setDoc(d: Doc) {
+    fun replaceDoc(d: Doc) {
         val old = doc
         doc = d
         d.progress = Runnable { if (doc === d) app.onIndexProgress(this) }
@@ -2532,7 +2532,7 @@ class MainActivity : Activity() {
                 p.stopScroll()
                 p.clearKept()
                 val old = p.doc
-                p.setDoc(Doc())
+                p.replaceDoc(Doc())
                 p.fileName = ""
                 p.bookmarks.clear()
                 p.rebuildBm()
@@ -3766,7 +3766,7 @@ class MainActivity : Activity() {
             d.src = s; d.srcKind = "uri"; d.srcRef = uri.toString(); d.target = uri
             p.stopScroll()
             p.clearKept()
-            p.setDoc(d)
+            p.replaceDoc(d)
             p.fileName = queryName(uri)
             p.bookmarks.clear()
             p.rebuildBm()
@@ -3859,7 +3859,7 @@ class MainActivity : Activity() {
             val v = p.view
             val cl = v.caretL; val cc = v.caretC; val top = v.topLine
             p.clearKept()
-            p.setDoc(nd)
+            p.replaceDoc(nd)
             nd.afterIndex = {
                 if (p.doc === nd) {
                     v.setCaret(cl, cc, false)
@@ -4005,7 +4005,7 @@ class MainActivity : Activity() {
         } else if (kind == "file" && ref.isNotEmpty() && File(ref).exists()) {
             d.src = openFileSrc(File(ref)); d.srcKind = "file"; d.srcRef = ref
         }
-        p.setDoc(d)
+        p.replaceDoc(d)
         val apply: () -> Unit = {
             val sr = d.src
             if (pieces != null && (sr == null || sr.size == savedSize)) {
