@@ -2908,7 +2908,6 @@ class MainActivity : Activity() {
         else (sorted.lastOrNull { it.line < c } ?: sorted[sorted.size - 1])
         p.view.setCaret(target.line, 0, false)
         p.view.scrollToLine(target.line, false)
-        toast("🔵 ${target.name}  (L${target.line + 1})")
     }
 
     fun showBookmarks() {
