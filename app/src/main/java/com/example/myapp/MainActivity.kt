@@ -1323,14 +1323,18 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
         val line = h[0]
         if (x < bmW()) { app.toggleBookmarkAt(pane, line); return }
         if (x < textLeft() - dpf(2f)) {
-            if (secondary) { app.copyLineNumber(pane, line); return }
+            app.copyLineNumber(pane, line)
+            if (secondary) return
             val consumed = app.onNumberTap(pane, line)
-            if (!consumed) { setCaret(line, 0, false); ensureCaretVisible() }
+            if (!consumed) {
+                setCaret(line, 0, false)
+                ensureCaretVisible()
+            }
             return
         }
         setCaret(h[0], h[1], false)
         val noKb = app.onTextTap(pane, line)
-        if (!noKb) showKeyboard()
+        if (noKb) app.copyLineNumber(pane, line) else showKeyboard()
     }
 
     fun showKeyboard() {
@@ -1383,7 +1387,7 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
                     val h = hit(ev.x, ev.y)
                     setCaret(h[0], h[1], false)
                     val noKb = app.onTextTap(pane, h[0])
-                    if (!noKb) showKeyboard()
+                    if (noKb) app.copyLineNumber(pane, h[0]) else showKeyboard()
                     mouseSel = true
                     startEdge()
                 }
@@ -1899,6 +1903,10 @@ class MainActivity : Activity() {
     private lateinit var delPanel: LinearLayout
     private var panelWhich = 0
     private var wrapBtn: Button? = null
+    private lateinit var mainUpBtn: Button
+    private lateinit var mainDownBtn: Button
+    private lateinit var mainStartBtn: Button
+    private lateinit var mainSpeedBtn: Button
 
     // find panel
     private lateinit var findEt: EditText
@@ -1936,6 +1944,8 @@ class MainActivity : Activity() {
     private lateinit var scmToggleBtn: Button
     private lateinit var scmFileTv: TextView
     private lateinit var scmStatusTv: TextView
+    private lateinit var scmFromEt: EditText
+    private lateinit var scmToEt: EditText
 
     // special copy mode
     var scmActive = false
@@ -2185,6 +2195,15 @@ class MainActivity : Activity() {
             wb,
             mkBtn("A−", g, cWhite) { zoomBy(-1) },
             mkBtn("A+", g, cWhite) { zoomBy(1) }))
+        mainUpBtn = mkBtn("▲ Up", 0xFF2980B9.toInt(), cWhite) { setDir("up") }
+        mainDownBtn = mkBtn("▼ Down", 0xFF2980B9.toInt(), cWhite) { setDir("down") }
+        mainStartBtn = mkBtn("▶ Scroll", 0xFF27AE60.toInt(), cWhite) { toggleAutoScroll() }
+        mainSpeedBtn = mkBtn("3.0/s", 0xFF3C3C3C.toInt(), 0xFFF0D060.toInt()) { speedDialog() }
+        tb.addView(eqRow(
+            mainUpBtn, mainDownBtn, mainStartBtn,
+            mkBtn("−", g, cWhite) { bumpSpeed(1.0 / 1.3) },
+            mainSpeedBtn,
+            mkBtn("+", g, cWhite) { bumpSpeed(1.3) }))
         root.addView(tb, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         val sr = LinearLayout(this)
@@ -2431,6 +2450,15 @@ class MainActivity : Activity() {
         val ms = section(0xFF1A0A2E.toInt())
         scmToggleBtn = mkBtn("📌 Special Copy Mode: OFF", 0xFF4A235A.toInt(), cWhite) { toggleScm() }
         ms.addView(scmToggleBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val sm = flowRow()
+        addGap(sm, mkTv("Lines  From:", 0xFFECF0F1.toInt(), 12f))
+        scmFromEt = mkEt("from", true, 70)
+        addGap(sm, scmFromEt, 70)
+        addGap(sm, mkTv("To:", 0xFFBDC3C7.toInt(), 12f))
+        scmToEt = mkEt("to", true, 70)
+        addGap(sm, scmToEt, 70)
+        addGap(sm, mkBtn("✔ Select", 0xFF8E44AD.toInt(), cWhite) { scmSelectManual() })
+        ms.addView(sm)
         ms.addView(eqRow(
             mkBtn("📁 Choose Output File", 0xFF2E4057.toInt(), cWhite) { scmChooseFile() },
             mkBtn("✖ Clear File", 0xFF566573.toInt(), cWhite) { scmClearFile() }))
@@ -2679,6 +2707,11 @@ class MainActivity : Activity() {
     fun syncScrollUi() {
         val p = cur ?: return
         if (!::speedSb.isInitialized) return
+        mainUpBtn.background = roundBg(if (p.dir == "up") 0xFF27AE60.toInt() else 0xFF2980B9.toInt(), 5)
+        mainDownBtn.background = roundBg(if (p.dir == "down") 0xFF27AE60.toInt() else 0xFF2980B9.toInt(), 5)
+        mainStartBtn.text = if (p.scrollActive) "■ Stop" else "▶ Scroll"
+        mainStartBtn.background = roundBg(if (p.scrollActive) 0xFFC0392B.toInt() else 0xFF27AE60.toInt(), 5)
+        mainSpeedBtn.text = if (p.speed >= 100.0) String.format("%.0f/s", p.speed) else String.format("%.1f/s", p.speed)
         dirUpBtn.background = roundBg(if (p.dir == "up") 0xFF27AE60.toInt() else 0xFF2980B9.toInt(), 5)
         dirDownBtn.background = roundBg(if (p.dir == "down") 0xFF27AE60.toInt() else 0xFF2980B9.toInt(), 5)
         speedSb.progress = (((p.speed - 0.01) / 199.99) * 1000.0).toInt().coerceIn(0, 1000)
@@ -2689,6 +2722,28 @@ class MainActivity : Activity() {
         } else {
             scrollStatusTv.text = "● Stopped"
             scrollStatusTv.setTextColor(0xFFE74C3C.toInt())
+        }
+    }
+
+    private fun toggleAutoScroll() {
+        val p = cur ?: return
+        if (p.scrollActive) p.stopScroll() else p.startScroll()
+        syncScrollUi()
+    }
+
+    private fun bumpSpeed(f: Double) {
+        val p = cur ?: return
+        p.speed = (p.speed * f).coerceIn(0.01, 10000.0)
+        sessionDirty = true
+        syncScrollUi()
+    }
+
+    private fun speedDialog() {
+        val p = cur ?: return
+        inputDialog("Scroll speed (lines per second)", String.format("%.2f", p.speed)) { s ->
+            val v = s.trim().toDoubleOrNull()
+            if (v == null || v <= 0.0 || v > 10000.0) toast("Enter a speed between 0.01 and 10000")
+            else { p.speed = v; sessionDirty = true; syncScrollUi() }
         }
     }
 
@@ -3221,6 +3276,37 @@ class MainActivity : Activity() {
         sessionDirty = true
     }
 
+    private fun scmSelectManual() {
+        val p = cur ?: return
+        val f = scmFromEt.text.toString().trim().toIntOrNull()
+        val t0 = scmToEt.text.toString().trim().toIntOrNull()
+        if (f == null) { toast("Enter the FROM line number"); return }
+        val t = t0 ?: f
+        val tot = p.doc.total
+        val a = minOf(f, t)
+        val b = maxOf(f, t)
+        if (a < 1 || b > tot) { toast("Lines must be within 1 – $tot"); return }
+        if (!scmActive) toggleScm()
+        scmPane = p
+        val v = p.view
+        for (q in panes) { q.view.scmHl = null; q.view.scmStartLine = -1; q.view.invalidate() }
+        scmStart = a - 1
+        if (a == b) {
+            scmEnd = -1
+            v.scmStartLine = a - 1
+            scmStatusTv.text = "✅ Line $a selected — press S / Save"
+        } else {
+            scmEnd = b - 1
+            v.scmHl = intArrayOf(a - 1, b - 1)
+            scmStatusTv.text = "✅ Range L$a–L$b (${b - a + 1} lines) — press S / Save. R = clear"
+        }
+        scmStatusTv.setTextColor(0xFF2ECC71.toInt())
+        scmFromEt.setText(a.toString())
+        scmToEt.setText(b.toString())
+        v.scrollToLine(a - 1, false)
+        v.invalidate()
+    }
+
     private fun scmOnClick(p: Pane, line: Int) {
         val v = p.view
         if (scmStart < 0) {
@@ -3228,6 +3314,8 @@ class MainActivity : Activity() {
             scmEnd = -1
             v.scmHl = null
             v.scmStartLine = line
+            scmFromEt.setText((line + 1).toString())
+            scmToEt.setText("")
             scmStatusTv.text = "📍 START = L${line + 1}. Tap END line for a range, or press S to save just this line"
             scmStatusTv.setTextColor(0xFFF39C12.toInt())
         } else {
@@ -3237,6 +3325,8 @@ class MainActivity : Activity() {
             scmEnd = e
             v.scmStartLine = -1
             v.scmHl = intArrayOf(s, e)
+            scmFromEt.setText((s + 1).toString())
+            scmToEt.setText((e + 1).toString())
             scmStatusTv.text = "✅ Range L${s + 1}–L${e + 1} (${e - s + 1} lines) — press S / Save. R = clear"
             scmStatusTv.setTextColor(0xFF2ECC71.toInt())
         }
@@ -3247,7 +3337,10 @@ class MainActivity : Activity() {
         scmStart = -1
         scmEnd = -1
         for (p in panes) { p.view.scmHl = null; p.view.scmStartLine = -1; p.view.invalidate() }
-        scmStatusTv.text = "Selection cleared. Tap a START line."
+        scmFromEt.setText("")
+        scmToEt.setText("")
+        scmClearFile()
+        scmStatusTv.text = "Selection and output file cleared. Tap a START line; you will be asked for an output file when you save."
         scmStatusTv.setTextColor(0xFF7F8C8D.toInt())
     }
 
