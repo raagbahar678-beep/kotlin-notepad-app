@@ -757,6 +757,7 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
     var fg: Int = 0xFFD4D4D4.toInt()
     var bgc: Int = 0xFF1E1E1E.toInt()
     var wrap: Boolean = false
+    var showNums: Boolean = true
 
     var caretL = 0
     var caretC = 0
@@ -820,6 +821,7 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
     private fun bmW(): Float = dpf(14f)
     private fun barW(): Float = dpf(18f)
     private fun numW(): Float {
+        if (!showNums) return 0f
         val digits = maxOf(3, doc.total.toString().length)
         return digits * numP.measureText("0") + dpf(10f)
     }
@@ -1090,8 +1092,10 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
 
         // gutter: number + bookmark dot
         if (y + rh > 0f) {
-            numP.color = if (ln == caretL) 0xFFD4D4D4.toInt() else 0xFF858585.toInt()
-            canvas.drawText((ln + 1).toString(), tl - dpf(8f), y + ascent, numP)
+            if (showNums) {
+                numP.color = if (ln == caretL) 0xFFD4D4D4.toInt() else 0xFF858585.toInt()
+                canvas.drawText((ln + 1).toString(), tl - dpf(8f), y + ascent, numP)
+            }
             if (pane.bmLines.contains(ln)) {
                 fillP.color = 0xFF4E9ADE.toInt()
                 canvas.drawCircle(bmW() / 2f, y + lineH / 2f, dpf(4f), fillP)
@@ -1241,7 +1245,7 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
             return true
         }
         override fun onLongPress(e: MotionEvent) {
-            if (e.x < textLeft()) {
+            if (showNums && e.x < textLeft()) {
                 val h = hit(textLeft(), e.y)
                 app.copyLineNumber(pane, h[0])
                 return
@@ -1322,7 +1326,7 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
         val h = hit(maxOf(x, textLeft()), y)
         val line = h[0]
         if (x < bmW()) { app.toggleBookmarkAt(pane, line); return }
-        if (x < textLeft() - dpf(2f)) {
+        if (showNums && x < textLeft() - dpf(2f)) {
             app.copyLineNumber(pane, line)
             if (secondary) return
             val consumed = app.onNumberTap(pane, line)
@@ -1903,6 +1907,7 @@ class MainActivity : Activity() {
     private lateinit var delPanel: LinearLayout
     private var panelWhich = 0
     private var wrapBtn: Button? = null
+    private var numBtn: Button? = null
     private lateinit var mainUpBtn: Button
     private lateinit var mainDownBtn: Button
     private lateinit var mainStartBtn: Button
@@ -2215,6 +2220,9 @@ class MainActivity : Activity() {
         statusTv.setOnClickListener { cur?.let { copyLineNumber(it, it.view.caretL) } }
         autosaveTv = mkTv("💾 Auto-saved", 0xFF90EE90.toInt(), 10f)
         sr.addView(statusTv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val nb = mkBtn("# ✓", 0xFF1A5C8A.toInt(), cWhite) { toggleNums() }
+        numBtn = nb
+        sr.addView(nb, lp(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0f, 1))
         sr.addView(autosaveTv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         root.addView(sr, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
@@ -2530,6 +2538,7 @@ class MainActivity : Activity() {
         updateStatus()
         syncScrollUi()
         wrapBtn?.text = if (p.view.wrap) "↩ Wrap ✓" else "↩ Wrap"
+        syncNumBtn()
         if (delPane != null && delPane !== p && panelWhich == 3) showPanel(0)
         sessionDirty = true
     }
@@ -2665,6 +2674,20 @@ class MainActivity : Activity() {
         v.invalidate()
         wrapBtn?.text = if (v.wrap) "↩ Wrap ✓" else "↩ Wrap"
         sessionDirty = true
+    }
+
+    fun toggleNums() {
+        val p = cur ?: return
+        p.view.showNums = !p.view.showNums
+        p.view.invalidate()
+        syncNumBtn()
+        sessionDirty = true
+        toast(if (p.view.showNums) "Line numbers shown" else "Line numbers hidden")
+    }
+
+    private fun syncNumBtn() {
+        val p = cur ?: return
+        numBtn?.text = if (p.view.showNums) "# ✓" else "# ✕"
     }
 
     fun copyLineNumber(p: Pane, line: Int) {
@@ -3722,7 +3745,7 @@ class MainActivity : Activity() {
             "Open in New Tab…", "Save As…", "Go to Line… (Ctrl+G)", "Special Copy Mode (Ctrl+M)",
             "Toggle Bookmark (Ctrl+B)", "Next Bookmark (F2)", "Previous Bookmark (Shift+F2)", "Clear All Bookmarks",
             "Font…", "Text Colour…", "Background Colour…", "Zoom In (Ctrl++)", "Zoom Out (Ctrl+-)", "Reset Zoom",
-            "Next Tab (Ctrl+Tab)", "Previous Tab (Ctrl+Shift+Tab)", "Keyboard on/off", "About", "Exit")
+            "Next Tab (Ctrl+Tab)", "Previous Tab (Ctrl+Shift+Tab)", "Keyboard on/off", "Show / Hide Line Numbers", "About", "Exit")
         AlertDialog.Builder(this).setTitle("Menu").setItems(items) { _, which ->
             when (which) {
                 0 -> openFiles(true)
@@ -3745,8 +3768,9 @@ class MainActivity : Activity() {
                     val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
                     if (imm.isActive(p.view)) imm.hideSoftInputFromWindow(p.view.windowToken, 0) else { p.view.requestFocus(); p.view.showKeyboard() }
                 }
-                17 -> showAbout()
-                18 -> { saveSessionNow(true); finish() }
+                17 -> toggleNums()
+                18 -> showAbout()
+                19 -> { saveSessionNow(true); finish() }
                 else -> { }
             }
         }.show()
@@ -4010,7 +4034,7 @@ class MainActivity : Activity() {
         o.put("top", v.topLine)
         o.put("ff", v.fontFamily); o.put("fs", v.fontSize)
         o.put("bold", v.bold); o.put("ital", v.italic)
-        o.put("fg", v.fg); o.put("bg", v.bgc); o.put("wrap", v.wrap)
+        o.put("fg", v.fg); o.put("bg", v.bgc); o.put("wrap", v.wrap); o.put("nums", v.showNums)
         o.put("speed", p.speed); o.put("dir", p.dir)
         val bms = JSONArray()
         for (b in p.bookmarks) { val bo = JSONObject(); bo.put("l", b.line); bo.put("n", b.name); bms.put(bo) }
@@ -4069,6 +4093,7 @@ class MainActivity : Activity() {
         v.fg = st.optInt("fg", v.fg)
         v.bgc = st.optInt("bg", v.bgc)
         v.wrap = st.optBoolean("wrap", false)
+        v.showNums = st.optBoolean("nums", true)
         v.applyFont()
         p.speed = st.optDouble("speed", 3.0)
         p.dir = st.optString("dir", "down")
