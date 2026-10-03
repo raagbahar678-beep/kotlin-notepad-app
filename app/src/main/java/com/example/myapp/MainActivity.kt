@@ -1097,8 +1097,16 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
                 canvas.drawText((ln + 1).toString(), tl - dpf(8f), y + ascent, numP)
             }
             if (pane.bmLines.contains(ln)) {
-                fillP.color = 0xFF4E9ADE.toInt()
-                canvas.drawCircle(bmW() / 2f, y + lineH / 2f, dpf(4f), fillP)
+                val cxm = bmW() / 2f
+                val cym = y + lineH / 2f
+                fillP.style = Paint.Style.FILL
+                fillP.color = 0xFF2D7DD2.toInt()
+                canvas.drawCircle(cxm, cym, dpf(5f), fillP)
+                fillP.style = Paint.Style.STROKE
+                fillP.strokeWidth = dpf(1.5f)
+                fillP.color = 0xFFBFE0FF.toInt()
+                canvas.drawCircle(cxm, cym, dpf(5f), fillP)
+                fillP.style = Paint.Style.FILL
             }
         }
 
@@ -1245,11 +1253,7 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
             return true
         }
         override fun onLongPress(e: MotionEvent) {
-            if (showNums && e.x < textLeft()) {
-                val h = hit(textLeft(), e.y)
-                app.copyLineNumber(pane, h[0])
-                return
-            }
+            if (e.x < textLeft() - dpf(2f)) return
             val h = hit(e.x, e.y)
             selectWordAt(h[0], h[1])
             selecting = true
@@ -1325,20 +1329,15 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
         requestFocus()
         val h = hit(maxOf(x, textLeft()), y)
         val line = h[0]
-        if (x < bmW()) { app.toggleBookmarkAt(pane, line); return }
-        if (showNums && x < textLeft() - dpf(2f)) {
-            app.copyLineNumber(pane, line)
-            if (secondary) return
+        if (x < textLeft() - dpf(2f)) {
+            // gutter: Notepad++-style bookmark toggle (Special Copy / Delete-Lines pick modes use it to select lines)
             val consumed = app.onNumberTap(pane, line)
-            if (!consumed) {
-                setCaret(line, 0, false)
-                ensureCaretVisible()
-            }
+            if (!consumed) app.toggleBookmarkAt(pane, line)
             return
         }
         setCaret(h[0], h[1], false)
         val noKb = app.onTextTap(pane, line)
-        if (noKb) app.copyLineNumber(pane, line) else showKeyboard()
+        if (!noKb) showKeyboard()
     }
 
     fun showKeyboard() {
@@ -1391,7 +1390,7 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
                     val h = hit(ev.x, ev.y)
                     setCaret(h[0], h[1], false)
                     val noKb = app.onTextTap(pane, h[0])
-                    if (noKb) app.copyLineNumber(pane, h[0]) else showKeyboard()
+                    if (!noKb) showKeyboard()
                     mouseSel = true
                     startEdge()
                 }
@@ -2889,18 +2888,15 @@ class MainActivity : Activity() {
         if (ex != null) {
             p.bookmarks.remove(ex)
             p.rebuildBm()
-            toast("Bookmark removed (line ${line + 1})")
             sessionDirty = true
             return
         }
         var def = p.doc.getLine(line).trim()
         if (def.length > 40) def = def.substring(0, 40)
         if (def.isEmpty()) def = "Line ${line + 1}"
-        inputDialog("Bookmark name (line ${line + 1})", def) { name ->
-            p.bookmarks.add(Bm(line, if (name.isBlank()) def else name.trim()))
-            p.rebuildBm()
-            sessionDirty = true
-        }
+        p.bookmarks.add(Bm(line, def))
+        p.rebuildBm()
+        sessionDirty = true
     }
 
     fun bmNext(forward: Boolean) {
@@ -3784,7 +3780,7 @@ class MainActivity : Activity() {
             " Ctrl+H / Ctrl+F  Find & Replace\n Ctrl+G  Go to line\n Ctrl+Z / Ctrl+Y  Undo / Redo\n Ctrl+B  Bookmark · F2 / Shift+F2  Next / previous\n Ctrl+Shift+B  Bookmark list\n" +
             " Ctrl+M  Special Copy Mode (then S = save range, R = clear)\n Ctrl+ + / Ctrl+ −  Zoom (also Ctrl+wheel, pinch)\n" +
             " Keys U / D  Auto-scroll direction\n Shift+wheel  Sideways scroll\n\n" +
-            "Touch: drag = scroll, long-press = select, double-tap = select word, drag the right/bottom bars to jump anywhere in huge files, long-press a line number to copy it.").setPositiveButton("OK", null).show()
+            "Touch: drag = scroll, long-press = select, double-tap = select word, drag the right/bottom bars to jump anywhere in huge files, tap the left gutter (dot or line number) to add / remove a bookmark circle, tap the blue status bar to copy the current line number.").setPositiveButton("OK", null).show()
     }
 
     // ───────── files: open / save ─────────
