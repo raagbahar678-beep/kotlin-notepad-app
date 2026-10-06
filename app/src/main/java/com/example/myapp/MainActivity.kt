@@ -142,6 +142,8 @@ fun openFileSrc(f: File): Src {
 
 // ═══════════════════════════ piece table ═══════════════════════════
 class Piece(val lines: Array<String>?, val start: Int, val count: Int)
+class PJ(val ver: Int, val arr: JSONArray?)
+class PJob(val o: JSONObject, val d: Doc, val pieces: Array<Piece>, val ver: Int)
 class Snap(val pieces: Array<Piece>, val cl: Int, val cc: Int)
 class DState(val pieces: Array<Piece>, val cum: IntArray, val total: Int)
 
@@ -170,8 +172,7 @@ class Doc {
     private var cacheChars: Long = 0L
     var progress: Runnable? = null
     var afterIndex: (() -> Unit)? = null
-    var pieceJson: JSONArray? = null
-    var pieceJsonVer: Int = -1
+    @Volatile var pjCache: PJ? = null
 
     val total: Int get() = st.total
 
@@ -1767,6 +1768,8 @@ class Pane(val app: MainActivity, val id: Int) {
     var scrollActive = false
     var acc = 0.0
     var wcVer = -1
+    var wcBusy = false
+    var lastLabel = ""
     var wcWords = 0
     var wcChars = 0
     lateinit var view: EditorView
@@ -1806,7 +1809,7 @@ class Pane(val app: MainActivity, val id: Int) {
     }
 
     fun onTextChanged() {
-        app.refreshTabs()
+        if (label() != lastLabel) app.refreshTabs()
         app.sessionDirty = true
     }
 
@@ -1910,6 +1913,7 @@ class MainActivity : Activity() {
 
     private lateinit var root: LinearLayout
     private lateinit var toolbarBox: LinearLayout
+    private lateinit var statusRow: LinearLayout
     private lateinit var tabStrip: LinearLayout
     private lateinit var tabScroll: HorizontalScrollView
     private lateinit var editorHost: FrameLayout
@@ -2236,6 +2240,7 @@ class MainActivity : Activity() {
         root.addView(tb, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         val sr = LinearLayout(this)
+        statusRow = sr
         sr.orientation = LinearLayout.HORIZONTAL
         sr.setBackgroundColor(0xFF007ACC.toInt())
         sr.setPadding(dp(6), dp(2), dp(6), dp(2))
@@ -2272,6 +2277,7 @@ class MainActivity : Activity() {
     }
 
     fun showPanel(which: Int) {
+        if (uiHidden && which != 0) setChromeHidden(false)
         val w = if (which == panelWhich && which != 0) 0 else which
         panelWhich = w
         findPanel.visibility = if (w == 1) View.VISIBLE else View.GONE
@@ -2570,6 +2576,7 @@ class MainActivity : Activity() {
     fun refreshTabs() {
         tabStrip.removeAllViews()
         for (p in panes) {
+            p.lastLabel = p.label()
             val sel = p === cur
             val b = Button(this)
             b.text = p.label()
@@ -2650,6 +2657,40 @@ class MainActivity : Activity() {
         ui.postDelayed({ statusPending = false; updateStatus() }, 50)
     }
 
+    /** counts words in a background thread, only once typing has paused, so keystrokes never wait for it */
+    private fun scheduleWordCount(p: Pane) {
+        if (p.wcBusy) return
+        p.wcBusy = true
+        val tick = object : Runnable {
+            override fun run() {
+                val d = p.doc
+                if (System.currentTimeMillis() - d.lastEditTime < 900L) { ui.postDelayed(this, 500); return }
+                val ver = d.version
+                Thread {
+                    var words = 0
+                    var chars = 0
+                    try {
+                        val tot = d.total
+                        for (i in 0 until tot) {
+                            val s = d.getLine(i)
+                            chars += s.length + 1
+                            var inW = false
+                            for (ch in s) { if (ch.isWhitespace()) inW = false else if (!inW) { inW = true; words++ } }
+                        }
+                    } catch (e: Exception) { }
+                    val w = words
+                    val c = chars
+                    ui.post {
+                        p.wcBusy = false
+                        if (p.doc === d && d.version == ver) { p.wcVer = ver; p.wcWords = w; p.wcChars = maxOf(0, c - 1) }
+                        if (p === cur) statusSoon()
+                    }
+                }.start()
+            }
+        }
+        ui.postDelayed(tick, 500)
+    }
+
     fun updateStatus() {
         val p = cur ?: return
         val v = p.view
@@ -2664,20 +2705,8 @@ class MainActivity : Activity() {
             val pct = if (sz > 0L) (d.indexedBytes * 100L / sz) else 0L
             sb.append("  |  ⏳ Indexing ").append(pct).append("% (read-only until done)")
         } else if (sz <= 2000000L && tot <= 60000) {
-            if (p.wcVer != d.version) {
-                var words = 0
-                var chars = 0
-                for (i in 0 until tot) {
-                    val t = d.getLine(i)
-                    chars += t.length + 1
-                    var inW = false
-                    for (ch in t) {
-                        if (ch.isWhitespace()) inW = false else if (!inW) { inW = true; words++ }
-                    }
-                }
-                p.wcVer = d.version; p.wcWords = words; p.wcChars = maxOf(0, chars - 1)
-            }
-            sb.append("  |  Words: ").append(p.wcWords).append("  Chars: ").append(p.wcChars)
+            if (p.wcVer != d.version) scheduleWordCount(p)
+            if (p.wcVer >= 0) sb.append("  |  Words: ").append(p.wcWords).append("  Chars: ").append(p.wcChars)
         }
         statusTv.text = sb.toString()
     }
@@ -4017,11 +4046,14 @@ class MainActivity : Activity() {
     }
 
     // ───────── session ─────────
-    private fun piecesJson(d: Doc): JSONArray? {
-        if (d.pieceJson != null && d.pieceJsonVer == d.version) return d.pieceJson
+    /** builds the JSON for a document's pieces (called on the save thread, from an immutable snapshot) */
+    private fun piecesJsonOf(d: Doc, pieces: Array<Piece>, ver: Int): JSONArray? {
+        val c = d.pjCache
+        if (c != null && c.ver == ver) return c.arr
         var chars = 0L
-        val arr = JSONArray()
-        for (pc in d.st.pieces) {
+        var result: JSONArray? = JSONArray()
+        val arr = result!!
+        for (pc in pieces) {
             val o = JSONObject()
             val il = pc.lines
             if (il == null) {
@@ -4030,17 +4062,16 @@ class MainActivity : Activity() {
                 o.put("t", "i")
                 val la = JSONArray()
                 for (s in il) { la.put(s); chars += s.length.toLong() }
-                if (chars > 6000000L) return null
+                if (chars > 6000000L) { result = null; break }
                 o.put("l", la)
             }
             arr.put(o)
         }
-        d.pieceJson = arr
-        d.pieceJsonVer = d.version
-        return arr
+        d.pjCache = PJ(ver, result)
+        return result
     }
 
-    private fun paneState(p: Pane): JSONObject {
+    private fun paneState(p: Pane, jobs: ArrayList<PJob>): JSONObject {
         val o = JSONObject()
         val d = p.doc
         val v = p.view
@@ -4052,8 +4083,10 @@ class MainActivity : Activity() {
         o.put("mod", d.modified)
         o.put("crlf", d.eol == "\r\n")
         if (d.modified || d.srcKind == "none") {
-            val pj = piecesJson(d)
-            if (pj != null) o.put("pieces", pj)
+            val ver = d.version
+            val c = d.pjCache
+            if (c != null && c.ver == ver) { val ca = c.arr; if (ca != null) o.put("pieces", ca) }
+            else jobs.add(PJob(o, d, d.st.pieces, ver))
         }
         o.put("cl", v.caretL); o.put("cc", v.caretC)
         o.put("top", v.topLine)
@@ -4067,24 +4100,35 @@ class MainActivity : Activity() {
         return o
     }
 
+    private val saveLock = Any()
+    private val saveExec = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+    /** only cheap fields are read on the UI thread; the heavy JSON build + file write happen on a worker */
     fun saveSessionNow(sync: Boolean) {
         try {
+            val jobs = ArrayList<PJob>()
             val o = JSONObject()
             val arr = JSONArray()
-            for (p in panes) arr.put(paneState(p))
+            for (p in panes) arr.put(paneState(p, jobs))
             o.put("tabs", arr)
             o.put("active", panes.indexOf(cur))
             o.put("scmUri", scmUri?.toString() ?: "")
-            val s = o.toString()
             sessionDirty = false
             val work = Runnable {
                 try {
-                    val tmp = File(filesDir, "session.tmp")
-                    tmp.writeText(s)
-                    tmp.renameTo(File(filesDir, "session.json"))
+                    synchronized(saveLock) {
+                        for (j in jobs) {
+                            val pj = piecesJsonOf(j.d, j.pieces, j.ver)
+                            if (pj != null) j.o.put("pieces", pj)
+                        }
+                        val s = o.toString()
+                        val tmp = File(filesDir, "session.tmp")
+                        tmp.writeText(s)
+                        tmp.renameTo(File(filesDir, "session.json"))
+                    }
                 } catch (e: Exception) { }
             }
-            if (sync) work.run() else Thread(work).start()
+            if (sync) work.run() else saveExec.execute(work)
         } catch (e: Exception) { }
     }
 
@@ -4193,6 +4237,7 @@ class MainActivity : Activity() {
         val inField = focus is EditText
         if (k == KeyEvent.KEYCODE_F2) { bmNext(!shift); return true }
         if (ctrl) {
+            if (k == KeyEvent.KEYCODE_H && shift && overlayOn) { setChromeHidden(!uiHidden); return true }
             if (inField && (k == KeyEvent.KEYCODE_C || k == KeyEvent.KEYCODE_X || k == KeyEvent.KEYCODE_V ||
                     k == KeyEvent.KEYCODE_A || k == KeyEvent.KEYCODE_Z || k == KeyEvent.KEYCODE_Y)) {
                 return false
@@ -4243,6 +4288,8 @@ class MainActivity : Activity() {
     private var ovSavedH = 0
     private var ovAlphaIdx = 0
     private var skipAutoDock = false
+    private var uiHidden = false
+    private var ovHideBtn: Button? = null
     private val ovAlphas = floatArrayOf(1.0f, 0.85f, 0.7f, 0.5f)
 
     /** context for dialogs: while floating, the activity is in the background, so dialogs must be overlay windows */
@@ -4253,6 +4300,19 @@ class MainActivity : Activity() {
     }
 
     fun panelOpen(): Boolean = panelWhich != 0
+
+    /** editor-only mode: hides tabs, every toolbar row, the status bar and any open panel */
+    fun setChromeHidden(h: Boolean) {
+        uiHidden = h
+        val vis = if (h) View.GONE else View.VISIBLE
+        tabScroll.visibility = vis
+        toolbarBox.visibility = vis
+        statusRow.visibility = vis
+        panelScroll.visibility = if (h || panelWhich == 0) View.GONE else View.VISIBLE
+        ovHideBtn?.text = if (h) "▤ Show UI" else "▤ Hide UI"
+        ovHideBtn?.background = roundBg(if (h) 0xFFE67E22.toInt() else 0xFF4A4A6A.toInt(), 5)
+        cur?.view?.requestFocus()
+    }
 
     fun toggleFloat() {
         if (overlayOn) exitFloat(true) else enterFloat()
@@ -4324,9 +4384,8 @@ class MainActivity : Activity() {
         ttl.setSingleLine(true)
         bar.addView(ttl, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         val gc = 0xFF4A4A6A.toInt()
-        val bTool = mkBtn("▤", gc, cWhite) {
-            toolbarBox.visibility = if (toolbarBox.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-        }
+        val bTool = mkBtn("▤ Hide UI", gc, cWhite) { setChromeHidden(!uiHidden) }
+        ovHideBtn = bTool
         val bType = mkBtn("⌨ On", 0xFF27AE60.toInt(), cWhite) { ovToggleTyping() }
         val bAlpha = mkBtn("◐", gc, cWhite) { ovCycleAlpha() }
         val bCol = mkBtn("▁", gc, cWhite) { ovToggleCollapse() }
@@ -4362,7 +4421,8 @@ class MainActivity : Activity() {
 
         val lp0 = WindowManager.LayoutParams(
             w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL, PixelFormat.TRANSLUCENT)
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT)
         lp0.gravity = Gravity.TOP or Gravity.START
         lp0.x = x
         lp0.y = y
@@ -4386,6 +4446,7 @@ class MainActivity : Activity() {
         ovRight = gr
         overlayOn = true
         ovUpdateAlphaBtn()
+        setChromeHidden(sp.getBoolean("hid", false))
         try { startForegroundService(Intent(this, FloatKeepService::class.java)) } catch (e: Exception) { }
         ui.postDelayed({ cur?.view?.requestFocus() }, 100)
         toast("📌 Floating: drag the title bar to move, drag edges/corners to resize, ⤢ = full app")
@@ -4406,8 +4467,9 @@ class MainActivity : Activity() {
         ovLp = null
         overlayOn = false
         try { stopService(Intent(this, FloatKeepService::class.java)) } catch (e: Exception) { }
+        ovHideBtn = null
+        setChromeHidden(false)
         setContentView(root)
-        toolbarBox.visibility = View.VISIBLE
         cur?.view?.requestFocus()
         if (bringFront) {
             try {
@@ -4431,6 +4493,7 @@ class MainActivity : Activity() {
         ovRight = null
         ovLp = null
         overlayOn = false
+        ovHideBtn = null
         try { stopService(Intent(this, FloatKeepService::class.java)) } catch (e: Exception) { }
     }
 
@@ -4442,6 +4505,7 @@ class MainActivity : Activity() {
         ed.putInt("w", lp.width)
         ed.putInt("h", if (ovCollapsed) ovSavedH else lp.height)
         ed.putInt("a", ovAlphaIdx)
+        ed.putBoolean("hid", uiHidden)
         ed.apply()
     }
 
