@@ -2,6 +2,18 @@ package com.example.myapp
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.pm.ServiceInfo
+import android.graphics.PixelFormat
+import android.os.Build
+import android.os.IBinder
+import android.provider.Settings
+import android.view.PointerIcon
+import android.view.WindowManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -1728,7 +1740,9 @@ class Bm(val line: Int, var name: String)
 
 class MaxHeightScroll(ctx: Context) : ScrollView(ctx) {
     override fun onMeasure(w: Int, h: Int) {
-        val mh = (resources.displayMetrics.heightPixels * 0.42f).toInt()
+        var mh = (resources.displayMetrics.heightPixels * 0.42f).toInt()
+        val avail = MeasureSpec.getSize(h)
+        if (avail > 0) mh = minOf(mh, (avail * 0.55f).toInt())
         super.onMeasure(w, MeasureSpec.makeMeasureSpec(mh, MeasureSpec.AT_MOST))
     }
 }
@@ -1895,6 +1909,7 @@ class MainActivity : Activity() {
     private val cTxt = 0xFFD4D4D4.toInt()
 
     private lateinit var root: LinearLayout
+    private lateinit var toolbarBox: LinearLayout
     private lateinit var tabStrip: LinearLayout
     private lateinit var tabScroll: HorizontalScrollView
     private lateinit var editorHost: FrameLayout
@@ -2070,7 +2085,7 @@ class MainActivity : Activity() {
         t.text = msg
         t.setPadding(dp(20), dp(16), dp(20), dp(16))
         busyTv = t
-        val dlg = AlertDialog.Builder(this).setTitle("Please wait").setView(t).setCancelable(false)
+        val dlg = DBuilder(this).setTitle("Please wait").setView(t).setCancelable(false)
             .setNegativeButton("Cancel") { _, _ -> opCancel = true; searchCancel = true }.create()
         dlg.show()
         return dlg
@@ -2145,8 +2160,16 @@ class MainActivity : Activity() {
         saveSessionNow(true)
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (overlayOn) {
+            if (skipAutoDock) skipAutoDock = false else exitFloat(false)
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        killOverlay()
         for (p in panes) { p.stopScroll(); p.doc.close() }
     }
 
@@ -2174,6 +2197,7 @@ class MainActivity : Activity() {
         tb.orientation = LinearLayout.VERTICAL
         tb.setBackgroundColor(cBar)
         tb.setPadding(dp(2), dp(2), dp(2), dp(2))
+        toolbarBox = tb
         val g = 0xFF3C3C3C.toInt()
         tb.addView(eqRow(
             mkBtn("📄 New", g, cWhite) { newPane() },
@@ -2188,6 +2212,7 @@ class MainActivity : Activity() {
             mkBtn("🔵 Marks", 0xFF2E3A2E.toInt(), 0xFF7FFFB2.toInt()) { showBookmarks() },
             mkBtn("✖ Close", 0xFF4A4A4A.toInt(), 0xFFFFAAAA.toInt()) { closeCurrentTab() },
             mkBtn("🛠 Tools", 0xFF4A3A6A.toInt(), 0xFFD8B8FF.toInt()) { showPanel(2) },
+            mkBtn("📌 Float", 0xFF1F6F5C.toInt(), cWhite) { toggleFloat() },
             mkBtn("⋮ Menu", g, cWhite) { showMenu() }))
         val wb = mkBtn("↩ Wrap", g, cWhite) { toggleWrap() }
         wrapBtn = wb
@@ -2595,7 +2620,7 @@ class MainActivity : Activity() {
 
     fun confirmUnsaved(p: Pane, proceed: () -> Unit) {
         if (!p.doc.modified) { proceed(); return }
-        AlertDialog.Builder(this).setTitle("Unsaved Changes")
+        DBuilder(this).setTitle("Unsaved Changes")
             .setMessage("Save changes to '" + p.label().trimStart('*') + "' before continuing?")
             .setPositiveButton("Save") { _, _ -> savePane(p) { proceed() } }
             .setNegativeButton("Don't save") { _, _ -> proceed() }
@@ -2861,7 +2886,7 @@ class MainActivity : Activity() {
         if (p.doc.indexing) { toast("Still indexing — try again in a moment"); return }
         val r = parseRange(rrFromEt, rrToEt, rrStatus, p.doc.total) ?: return
         val txt = rrTextEt.text.toString()
-        AlertDialog.Builder(this).setTitle("Replace lines")
+        DBuilder(this).setTitle("Replace lines")
             .setMessage("Replace lines ${r[0]}–${r[1]} with the new text?")
             .setPositiveButton("Replace") { _, _ ->
                 val v = p.view
@@ -2878,7 +2903,7 @@ class MainActivity : Activity() {
         et.setText(initial)
         et.setSingleLine(true)
         et.setSelection(initial.length)
-        AlertDialog.Builder(this).setTitle(title).setView(et)
+        DBuilder(this).setTitle(title).setView(et)
             .setPositiveButton("OK") { _, _ -> ok(et.text.toString()) }
             .setNegativeButton("Cancel", null).show()
     }
@@ -2950,7 +2975,7 @@ class MainActivity : Activity() {
             }
         }
         fill()
-        val dlg = AlertDialog.Builder(this).setTitle("🔵 Bookmarks  (F2 next · Shift+F2 prev)").setView(sv)
+        val dlg = DBuilder(this).setTitle("🔵 Bookmarks  (F2 next · Shift+F2 prev)").setView(sv)
             .setPositiveButton("Close", null)
             .setNeutralButton("Add here") { _, _ ->
                 if (p.bookmarks.none { it.line == p.view.caretL }) toggleBookmarkAt(p, p.view.caretL)
@@ -3161,7 +3186,7 @@ class MainActivity : Activity() {
         val targets = ArrayList<Pane>()
         if (rbAll.isChecked) targets.addAll(panes) else { val c = cur ?: return; targets.add(c) }
         for (t in targets) if (t.doc.indexing) { toast("A file is still indexing — try again shortly"); return }
-        AlertDialog.Builder(this).setTitle("Replace All")
+        DBuilder(this).setTitle("Replace All")
             .setMessage("Replace all matches in ${targets.size} tab(s)?\nVery large files (>8 MB) are rewritten through a temporary copy (needs free space about the file size). Undo works for the last 3 such replaces while the app stays open.")
             .setPositiveButton("Replace All") { _, _ ->
                 val results = HashMap<Pane, ReplaceResult>()
@@ -3269,7 +3294,7 @@ class MainActivity : Activity() {
     }
 
     private fun scmChooseFile() {
-        AlertDialog.Builder(this).setTitle("Special Copy output file")
+        DBuilder(this).setTitle("Special Copy output file")
             .setItems(arrayOf("Create a new file…", "Append to an existing file…")) { _, which ->
                 if (which == 0) {
                     val i = Intent(Intent.ACTION_CREATE_DOCUMENT)
@@ -3563,7 +3588,7 @@ class MainActivity : Activity() {
             lines += (e - q[0] + 1).toLong()
         }
         if (rs.isEmpty()) { delSummary.text = "⚠ No valid ranges (document has $tot lines)"; return }
-        AlertDialog.Builder(this).setTitle("Delete lines")
+        DBuilder(this).setTitle("Delete lines")
             .setMessage("Delete up to $lines line(s) in ${rs.size} range(s)?  (Undo available)")
             .setPositiveButton("Delete") { _, _ ->
                 val v = p.view
@@ -3621,7 +3646,7 @@ class MainActivity : Activity() {
         box.addView(rg)
         val st = mkTv("", 0xFFF39C12.toInt(), 12f)
         box.addView(st)
-        val dlg = AlertDialog.Builder(this).setTitle("🔗 Remove blank lines between A and B").setView(box)
+        val dlg = DBuilder(this).setTitle("🔗 Remove blank lines between A and B").setView(box)
             .setPositiveButton("Count", null).setNeutralButton("Apply", null).setNegativeButton("Close", null).create()
         dlg.show()
         fun targets(): ArrayList<Pane> {
@@ -3695,7 +3720,7 @@ class MainActivity : Activity() {
         box.addView(cb); box.addView(ci)
         val sv = ScrollView(this)
         sv.addView(box)
-        AlertDialog.Builder(this).setTitle("Font").setView(sv)
+        DBuilder(this).setTitle("Font").setView(sv)
             .setPositiveButton("Apply") { _, _ ->
                 for (i in fams.indices) if (rg.checkedRadioButtonId == ids[i]) v.fontFamily = fams[i]
                 v.fontSize = (sz.text.toString().toIntOrNull() ?: v.fontSize).coerceIn(6, 72)
@@ -3728,7 +3753,7 @@ class MainActivity : Activity() {
         }
         box.addView(mkTv("Hex colour:", cTxt, 12f))
         box.addView(hex)
-        AlertDialog.Builder(this).setTitle(title).setView(box)
+        DBuilder(this).setTitle(title).setView(box)
             .setPositiveButton("OK") { _, _ ->
                 try { ok(android.graphics.Color.parseColor(hex.text.toString().trim())) } catch (e: Exception) { toast("Invalid colour") }
             }.setNegativeButton("Cancel", null).show()
@@ -3740,8 +3765,8 @@ class MainActivity : Activity() {
             "Open in New Tab…", "Save As…", "Go to Line… (Ctrl+G)", "Special Copy Mode (Ctrl+M)",
             "Toggle Bookmark (Ctrl+B)", "Next Bookmark (F2)", "Previous Bookmark (Shift+F2)", "Clear All Bookmarks",
             "Font…", "Text Colour…", "Background Colour…", "Zoom In (Ctrl++)", "Zoom Out (Ctrl+-)", "Reset Zoom",
-            "Next Tab (Ctrl+Tab)", "Previous Tab (Ctrl+Shift+Tab)", "Keyboard on/off", "Show / Hide Line Numbers", "About", "Exit")
-        AlertDialog.Builder(this).setTitle("Menu").setItems(items) { _, which ->
+            "Next Tab (Ctrl+Tab)", "Previous Tab (Ctrl+Shift+Tab)", "Keyboard on/off", "Show / Hide Line Numbers", "About", "📌 Floating window (Ctrl+Shift+T)", "Exit")
+        DBuilder(this).setTitle("Menu").setItems(items) { _, which ->
             when (which) {
                 0 -> openFiles(true)
                 1 -> saveAs(p, null)
@@ -3765,20 +3790,21 @@ class MainActivity : Activity() {
                 }
                 17 -> toggleNums()
                 18 -> showAbout()
-                19 -> { saveSessionNow(true); finish() }
+                19 -> toggleFloat()
+                20 -> { saveSessionNow(true); finish() }
                 else -> { }
             }
         }.show()
     }
 
     private fun showAbout() {
-        AlertDialog.Builder(this).setTitle("Notepad — large-file edition").setMessage(
+        DBuilder(this).setTitle("Notepad — large-file edition").setMessage(
             "Opens text files of any size (bytes → many GB). Only the visible lines are ever loaded; the file is indexed in the background and you can start reading immediately. Editing unlocks when indexing finishes.\n\n" +
             "Shortcuts (external keyboard):\n" +
             " Ctrl+O / Ctrl+Shift+O  Open file(s)\n Ctrl+S / Ctrl+Shift+S  Save / Save As\n Ctrl+T  New tab · Ctrl+W  Close tab\n Ctrl+Tab / Ctrl+Shift+Tab  Switch tab\n" +
             " Ctrl+H / Ctrl+F  Find & Replace\n Ctrl+G  Go to line\n Ctrl+Z / Ctrl+Y  Undo / Redo\n Ctrl+B  Bookmark · F2 / Shift+F2  Next / previous\n Ctrl+Shift+B  Bookmark list\n" +
             " Ctrl+M  Special Copy Mode (then S = save range, R = clear)\n Ctrl+ + / Ctrl+ −  Zoom (also Ctrl+wheel, pinch)\n" +
-            " Keys U / D  Auto-scroll direction\n Shift+wheel  Sideways scroll\n\n" +
+            " Keys U / D  Auto-scroll direction\n Shift+wheel  Sideways scroll\n Ctrl+Shift+T  Floating always-on-top window (drag title bar to move, drag edges/corners to resize)\n\n" +
             "Touch: drag = scroll, long-press = select, double-tap = select word, drag the right/bottom bars to jump anywhere in huge files, tap the left gutter (dot or line number) to add / remove a bookmark circle, tap the blue status bar to copy the current line number.").setPositiveButton("OK", null).show()
     }
 
@@ -3804,6 +3830,10 @@ class MainActivity : Activity() {
     @Suppress("DEPRECATION")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (overlayOn) {
+            skipAutoDock = true
+            ui.postDelayed({ if (overlayOn) moveTaskToBack(true) }, 200)
+        }
         if (resultCode != RESULT_OK || data == null) { pendingScmSave = false; return }
         if (requestCode == RC_OPEN) {
             val uris = ArrayList<Uri>()
@@ -4155,41 +4185,422 @@ class MainActivity : Activity() {
     }
 
     // ───────── hardware keyboard shortcuts ─────────
-    override fun dispatchKeyEvent(e: KeyEvent): Boolean {
-        if (e.action == KeyEvent.ACTION_DOWN) {
-            val ctrl = e.isCtrlPressed
-            val shift = e.isShiftPressed
-            val k = e.keyCode
-            val inField = currentFocus is EditText
-            if (k == KeyEvent.KEYCODE_F2) { bmNext(!shift); return true }
-            if (ctrl) {
-                if (inField && (k == KeyEvent.KEYCODE_C || k == KeyEvent.KEYCODE_X || k == KeyEvent.KEYCODE_V ||
-                        k == KeyEvent.KEYCODE_A || k == KeyEvent.KEYCODE_Z || k == KeyEvent.KEYCODE_Y)) {
-                    return super.dispatchKeyEvent(e)
-                }
-                val p = cur
-                when (k) {
-                    KeyEvent.KEYCODE_T -> { newPane(); return true }
-                    KeyEvent.KEYCODE_O -> { openFiles(shift); return true }
-                    KeyEvent.KEYCODE_S -> { if (p != null) { if (shift) saveAs(p, null) else savePane(p, null) }; return true }
-                    KeyEvent.KEYCODE_W -> { closeCurrentTab(); return true }
-                    KeyEvent.KEYCODE_H, KeyEvent.KEYCODE_F -> { if (panelWhich != 1) showPanel(1) else findEt.requestFocus(); return true }
-                    KeyEvent.KEYCODE_G -> { focusGoto(); return true }
-                    KeyEvent.KEYCODE_B -> { if (shift) showBookmarks() else if (p != null) toggleBookmarkAt(p, p.view.caretL); return true }
-                    KeyEvent.KEYCODE_M -> { toggleScm(); return true }
-                    KeyEvent.KEYCODE_Z -> { p?.view?.doUndo(); return true }
-                    KeyEvent.KEYCODE_Y -> { p?.view?.doRedo(); return true }
-                    KeyEvent.KEYCODE_C -> { p?.view?.copySel(false); return true }
-                    KeyEvent.KEYCODE_X -> { p?.view?.copySel(true); return true }
-                    KeyEvent.KEYCODE_V -> { p?.view?.paste(); return true }
-                    KeyEvent.KEYCODE_A -> { p?.view?.selectAll(); return true }
-                    KeyEvent.KEYCODE_EQUALS, KeyEvent.KEYCODE_PLUS, KeyEvent.KEYCODE_NUMPAD_ADD -> { zoomBy(1); return true }
-                    KeyEvent.KEYCODE_MINUS, KeyEvent.KEYCODE_NUMPAD_SUBTRACT -> { zoomBy(-1); return true }
-                    KeyEvent.KEYCODE_TAB -> { nextTab(if (shift) -1 else 1); return true }
-                    else -> { }
-                }
+    fun handleKey(e: KeyEvent, focus: View?): Boolean {
+        if (e.action != KeyEvent.ACTION_DOWN) return false
+        val ctrl = e.isCtrlPressed
+        val shift = e.isShiftPressed
+        val k = e.keyCode
+        val inField = focus is EditText
+        if (k == KeyEvent.KEYCODE_F2) { bmNext(!shift); return true }
+        if (ctrl) {
+            if (inField && (k == KeyEvent.KEYCODE_C || k == KeyEvent.KEYCODE_X || k == KeyEvent.KEYCODE_V ||
+                    k == KeyEvent.KEYCODE_A || k == KeyEvent.KEYCODE_Z || k == KeyEvent.KEYCODE_Y)) {
+                return false
+            }
+            val p = cur
+            when (k) {
+                KeyEvent.KEYCODE_T -> { if (shift) toggleFloat() else newPane(); return true }
+                KeyEvent.KEYCODE_O -> { openFiles(shift); return true }
+                KeyEvent.KEYCODE_S -> { if (p != null) { if (shift) saveAs(p, null) else savePane(p, null) }; return true }
+                KeyEvent.KEYCODE_W -> { closeCurrentTab(); return true }
+                KeyEvent.KEYCODE_H, KeyEvent.KEYCODE_F -> { if (panelWhich != 1) showPanel(1) else findEt.requestFocus(); return true }
+                KeyEvent.KEYCODE_G -> { focusGoto(); return true }
+                KeyEvent.KEYCODE_B -> { if (shift) showBookmarks() else if (p != null) toggleBookmarkAt(p, p.view.caretL); return true }
+                KeyEvent.KEYCODE_M -> { toggleScm(); return true }
+                KeyEvent.KEYCODE_Z -> { p?.view?.doUndo(); return true }
+                KeyEvent.KEYCODE_Y -> { p?.view?.doRedo(); return true }
+                KeyEvent.KEYCODE_C -> { p?.view?.copySel(false); return true }
+                KeyEvent.KEYCODE_X -> { p?.view?.copySel(true); return true }
+                KeyEvent.KEYCODE_V -> { p?.view?.paste(); return true }
+                KeyEvent.KEYCODE_A -> { p?.view?.selectAll(); return true }
+                KeyEvent.KEYCODE_EQUALS, KeyEvent.KEYCODE_PLUS, KeyEvent.KEYCODE_NUMPAD_ADD -> { zoomBy(1); return true }
+                KeyEvent.KEYCODE_MINUS, KeyEvent.KEYCODE_NUMPAD_SUBTRACT -> { zoomBy(-1); return true }
+                KeyEvent.KEYCODE_TAB -> { nextTab(if (shift) -1 else 1); return true }
+                else -> { }
             }
         }
+        return false
+    }
+
+    override fun dispatchKeyEvent(e: KeyEvent): Boolean {
+        if (handleKey(e, currentFocus)) return true
         return super.dispatchKeyEvent(e)
+    }
+
+    // ═══════════════ floating / always-on-top window mode ═══════════════
+    var overlayOn = false
+    var ovLp: WindowManager.LayoutParams? = null
+    private var ovWm: WindowManager? = null
+    private var ovFrame: OvFrame? = null
+    private var ovBody: FrameLayout? = null
+    private var ovBottom: LinearLayout? = null
+    private var ovLeft: View? = null
+    private var ovRight: View? = null
+    private var ovTypeBtn: Button? = null
+    private var ovAlphaBtn: Button? = null
+    private var ovCollapsed = false
+    private var ovTyping = true
+    private var ovSavedH = 0
+    private var ovAlphaIdx = 0
+    private var skipAutoDock = false
+    private val ovAlphas = floatArrayOf(1.0f, 0.85f, 0.7f, 0.5f)
+
+    /** context for dialogs: while floating, the activity is in the background, so dialogs must be overlay windows */
+    fun dctx(): Context = if (overlayOn) applicationContext else this
+
+    fun prepDialog(d: AlertDialog) {
+        if (overlayOn) d.window?.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
+    }
+
+    fun panelOpen(): Boolean = panelWhich != 0
+
+    fun toggleFloat() {
+        if (overlayOn) exitFloat(true) else enterFloat()
+    }
+
+    private fun ovSetIcon(v: View, type: Int) {
+        try { v.pointerIcon = PointerIcon.getSystemIcon(this, type) } catch (e: Exception) { }
+    }
+
+    private fun mkGrip(mask: Int, color: Int, icon: Int, label: String): TextView {
+        val t = TextView(this)
+        t.text = label
+        t.setTextColor(cWhite)
+        t.textSize = 9f
+        t.gravity = Gravity.CENTER
+        t.setBackgroundColor(color)
+        t.setOnTouchListener(OvTouch(this, mask))
+        ovSetIcon(t, icon)
+        return t
+    }
+
+    fun enterFloat() {
+        if (overlayOn) return
+        if (!Settings.canDrawOverlays(this)) {
+            toast("Turn ON \"Allow display over other apps\" for this app, come back and tap Float again")
+            try {
+                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            } catch (e: Exception) {
+                toast("Open Settings > Apps > Big Notepad > Display over other apps")
+            }
+            return
+        }
+        val wm = applicationContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val dm = resources.displayMetrics
+        val sp = getSharedPreferences("floatwin", Context.MODE_PRIVATE)
+        val sw = dm.widthPixels
+        val sh = dm.heightPixels
+        var w = sp.getInt("w", minOf((sw * 0.92f).toInt(), dp(440)))
+        var h = sp.getInt("h", (sh * 0.55f).toInt())
+        w = w.coerceIn(dp(240), maxOf(dp(240), sw))
+        h = h.coerceIn(dp(160), maxOf(dp(160), sh))
+        var x = sp.getInt("x", (sw - w) / 2)
+        var y = sp.getInt("y", dp(48))
+        x = x.coerceIn(-(w - dp(70)), sw - dp(70))
+        y = y.coerceIn(0, maxOf(0, sh - dp(40)))
+        ovAlphaIdx = sp.getInt("a", 0).coerceIn(0, ovAlphas.size - 1)
+        ovTyping = true
+        ovCollapsed = false
+        ovSavedH = h
+
+        val f = OvFrame(this, this)
+        f.orientation = LinearLayout.HORIZONTAL
+        f.setBackgroundColor(0xFF007ACC.toInt())
+        val gl = mkGrip(1, 0xFF007ACC.toInt(), PointerIcon.TYPE_HORIZONTAL_DOUBLE_ARROW, "")
+        val gr = mkGrip(2, 0xFF007ACC.toInt(), PointerIcon.TYPE_HORIZONTAL_DOUBLE_ARROW, "")
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.setBackgroundColor(cBg)
+
+        // title bar = drag handle + buttons
+        val bar = LinearLayout(this)
+        bar.orientation = LinearLayout.HORIZONTAL
+        bar.gravity = Gravity.CENTER_VERTICAL
+        bar.setBackgroundColor(0xFF37374F.toInt())
+        bar.setPadding(dp(4), dp(1), dp(4), dp(1))
+        bar.setOnTouchListener(OvTouch(this, 0))
+        ovSetIcon(bar, PointerIcon.TYPE_ALL_SCROLL)
+        val ttl = mkTv("📌 Big Notepad  (drag here to move)", cWhite, 11f)
+        ttl.setSingleLine(true)
+        bar.addView(ttl, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val gc = 0xFF4A4A6A.toInt()
+        val bTool = mkBtn("▤", gc, cWhite) {
+            toolbarBox.visibility = if (toolbarBox.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        }
+        val bType = mkBtn("⌨ On", 0xFF27AE60.toInt(), cWhite) { ovToggleTyping() }
+        val bAlpha = mkBtn("◐", gc, cWhite) { ovCycleAlpha() }
+        val bCol = mkBtn("▁", gc, cWhite) { ovToggleCollapse() }
+        val bFull = mkBtn("⤢", 0xFF2980B9.toInt(), cWhite) { exitFloat(true) }
+        ovTypeBtn = bType
+        ovAlphaBtn = bAlpha
+        for (b in listOf(bTool, bType, bAlpha, bCol, bFull)) {
+            bar.addView(b, lp(ViewGroup.LayoutParams.WRAP_CONTENT, dp(26), 0f, 1))
+        }
+
+        // body: the whole notepad UI
+        val body = FrameLayout(this)
+        body.setBackgroundColor(cBg)
+        (root.parent as? ViewGroup)?.removeView(root)
+        body.addView(root, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        // bottom resize bar (corners + bottom edge)
+        val bottom = LinearLayout(this)
+        bottom.orientation = LinearLayout.HORIZONTAL
+        val bl = mkGrip(5, 0xFF2B8AD6.toInt(), PointerIcon.TYPE_TOP_RIGHT_DIAGONAL_DOUBLE_ARROW, "◣")
+        val bm = mkGrip(4, 0xFF005A9E.toInt(), PointerIcon.TYPE_VERTICAL_DOUBLE_ARROW, "▬▬ resize ▬▬")
+        val br = mkGrip(6, 0xFF2B8AD6.toInt(), PointerIcon.TYPE_TOP_LEFT_DIAGONAL_DOUBLE_ARROW, "◢")
+        bottom.addView(bl, LinearLayout.LayoutParams(dp(40), dp(18)))
+        bottom.addView(bm, LinearLayout.LayoutParams(0, dp(18), 1f))
+        bottom.addView(br, LinearLayout.LayoutParams(dp(40), dp(18)))
+
+        col.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        col.addView(body, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        col.addView(bottom, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        f.addView(gl, LinearLayout.LayoutParams(dp(10), ViewGroup.LayoutParams.MATCH_PARENT))
+        f.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+        f.addView(gr, LinearLayout.LayoutParams(dp(10), ViewGroup.LayoutParams.MATCH_PARENT))
+
+        val lp0 = WindowManager.LayoutParams(
+            w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL, PixelFormat.TRANSLUCENT)
+        lp0.gravity = Gravity.TOP or Gravity.START
+        lp0.x = x
+        lp0.y = y
+        lp0.alpha = ovAlphas[ovAlphaIdx]
+        lp0.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        lp0.title = "BigNotepadFloat"
+        try {
+            wm.addView(f, lp0)
+        } catch (e: Exception) {
+            body.removeView(root)
+            setContentView(root)
+            toast("❌ Cannot show floating window: " + (e.message ?: e.toString()))
+            return
+        }
+        ovWm = wm
+        ovLp = lp0
+        ovFrame = f
+        ovBody = body
+        ovBottom = bottom
+        ovLeft = gl
+        ovRight = gr
+        overlayOn = true
+        ovUpdateAlphaBtn()
+        try { startForegroundService(Intent(this, FloatKeepService::class.java)) } catch (e: Exception) { }
+        ui.postDelayed({ cur?.view?.requestFocus() }, 100)
+        toast("📌 Floating: drag the title bar to move, drag edges/corners to resize, ⤢ = full app")
+        ui.postDelayed({ if (overlayOn) moveTaskToBack(true) }, 300)
+    }
+
+    fun exitFloat(bringFront: Boolean) {
+        if (!overlayOn) return
+        saveOvGeom()
+        val f = ovFrame
+        try { ovBody?.removeView(root) } catch (e: Exception) { }
+        try { if (f != null) ovWm?.removeView(f) } catch (e: Exception) { }
+        ovFrame = null
+        ovBody = null
+        ovBottom = null
+        ovLeft = null
+        ovRight = null
+        ovLp = null
+        overlayOn = false
+        try { stopService(Intent(this, FloatKeepService::class.java)) } catch (e: Exception) { }
+        setContentView(root)
+        toolbarBox.visibility = View.VISIBLE
+        cur?.view?.requestFocus()
+        if (bringFront) {
+            try {
+                val i = Intent(this, MainActivity::class.java)
+                i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                startActivity(i)
+            } catch (e: Exception) { }
+        }
+        sessionDirty = true
+        updateStatus()
+    }
+
+    private fun killOverlay() {
+        if (!overlayOn) return
+        try { ovBody?.removeView(root) } catch (e: Exception) { }
+        try { val f = ovFrame; if (f != null) ovWm?.removeView(f) } catch (e: Exception) { }
+        ovFrame = null
+        ovBody = null
+        ovBottom = null
+        ovLeft = null
+        ovRight = null
+        ovLp = null
+        overlayOn = false
+        try { stopService(Intent(this, FloatKeepService::class.java)) } catch (e: Exception) { }
+    }
+
+    fun saveOvGeom() {
+        val lp = ovLp ?: return
+        val ed = getSharedPreferences("floatwin", Context.MODE_PRIVATE).edit()
+        ed.putInt("x", lp.x)
+        ed.putInt("y", lp.y)
+        ed.putInt("w", lp.width)
+        ed.putInt("h", if (ovCollapsed) ovSavedH else lp.height)
+        ed.putInt("a", ovAlphaIdx)
+        ed.apply()
+    }
+
+    /** mask: 0 = move window; bit1 = left edge, bit2 = right edge, bit4 = bottom edge */
+    fun ovApply(mask: Int, ox: Int, oy: Int, ow: Int, oh: Int, dx: Int, dy: Int) {
+        val lp = ovLp ?: return
+        val f = ovFrame ?: return
+        val dm = resources.displayMetrics
+        val sw = dm.widthPixels
+        val sh = dm.heightPixels
+        if (mask == 0) {
+            lp.x = (ox + dx).coerceIn(-(lp.width - dp(70)), sw - dp(70))
+            lp.y = (oy + dy).coerceIn(0, maxOf(0, sh - dp(40)))
+        } else {
+            val minW = dp(240)
+            val minH = dp(160)
+            var nx = ox
+            var nw = ow
+            var nh = oh
+            if ((mask and 2) != 0) nw = maxOf(minW, minOf(ow + dx, maxOf(minW, sw - ox)))
+            if ((mask and 1) != 0) {
+                nw = maxOf(minW, ow - dx)
+                nx = ox + ow - nw
+                if (nx < 0) { nx = 0; nw = maxOf(minW, ox + ow) }
+            }
+            if ((mask and 4) != 0) nh = maxOf(minH, minOf(oh + dy, maxOf(minH, sh - oy)))
+            lp.x = nx
+            lp.width = nw
+            if ((mask and 4) != 0 && !ovCollapsed) lp.height = nh
+        }
+        try { ovWm?.updateViewLayout(f, lp) } catch (e: Exception) { }
+    }
+
+    fun ovDone() {
+        val lp = ovLp ?: return
+        if (!ovCollapsed) ovSavedH = lp.height
+        saveOvGeom()
+    }
+
+    private fun ovToggleCollapse() {
+        val lp = ovLp ?: return
+        val f = ovFrame ?: return
+        ovCollapsed = !ovCollapsed
+        val vis = if (ovCollapsed) View.GONE else View.VISIBLE
+        ovBody?.visibility = vis
+        ovBottom?.visibility = vis
+        ovLeft?.visibility = vis
+        ovRight?.visibility = vis
+        if (ovCollapsed) {
+            ovSavedH = lp.height
+            lp.height = WindowManager.LayoutParams.WRAP_CONTENT
+        } else {
+            lp.height = ovSavedH
+        }
+        try { ovWm?.updateViewLayout(f, lp) } catch (e: Exception) { }
+        saveOvGeom()
+    }
+
+    private fun ovCycleAlpha() {
+        val lp = ovLp ?: return
+        val f = ovFrame ?: return
+        ovAlphaIdx = (ovAlphaIdx + 1) % ovAlphas.size
+        lp.alpha = ovAlphas[ovAlphaIdx]
+        try { ovWm?.updateViewLayout(f, lp) } catch (e: Exception) { }
+        ovUpdateAlphaBtn()
+        saveOvGeom()
+    }
+
+    private fun ovUpdateAlphaBtn() {
+        ovAlphaBtn?.text = "◐ " + Math.round(ovAlphas[ovAlphaIdx] * 100f) + "%"
+    }
+
+    /** Typing ON: the window takes the keyboard. Typing OFF: the window stays on top but other apps keep the keyboard. */
+    private fun ovToggleTyping() {
+        val lp = ovLp ?: return
+        val f = ovFrame ?: return
+        ovTyping = !ovTyping
+        lp.flags = if (ovTyping) (lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv())
+        else (lp.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+        try { ovWm?.updateViewLayout(f, lp) } catch (e: Exception) { }
+        ovTypeBtn?.text = if (ovTyping) "⌨ On" else "⌨ Off"
+        ovTypeBtn?.background = roundBg(if (ovTyping) 0xFF27AE60.toInt() else 0xFF7F8C8D.toInt(), 5)
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        if (ovTyping) {
+            cur?.view?.let { it.requestFocus(); it.showKeyboard() }
+            toast("Typing ON: this window uses the keyboard")
+        } else {
+            imm.hideSoftInputFromWindow(f.windowToken, 0)
+            toast("Typing OFF: other apps get the keyboard; this window stays on top")
+        }
+    }
+}
+
+// ═══════════════════════════ dialog builder (works while floating) ═══════════════════════════
+class DBuilder(val app: MainActivity) : AlertDialog.Builder(app.dctx()) {
+    override fun create(): AlertDialog {
+        val d = super.create()
+        app.prepDialog(d)
+        return d
+    }
+}
+
+// ═══════════════════════════ floating window root (keys + back) ═══════════════════════════
+class OvFrame(ctx: Context, val app: MainActivity) : LinearLayout(ctx) {
+    override fun dispatchKeyEvent(e: KeyEvent): Boolean {
+        if (e.keyCode == KeyEvent.KEYCODE_BACK) {
+            if (e.action == KeyEvent.ACTION_UP && app.panelOpen()) { app.showPanel(0); return true }
+            return super.dispatchKeyEvent(e)
+        }
+        if (app.handleKey(e, findFocus())) return true
+        return super.dispatchKeyEvent(e)
+    }
+}
+
+// ═══════════════════════════ drag / resize handler (finger or mouse) ═══════════════════════════
+class OvTouch(val app: MainActivity, val mask: Int) : View.OnTouchListener {
+    private var sx = 0f
+    private var sy = 0f
+    private var ox = 0
+    private var oy = 0
+    private var ow = 0
+    private var oh = 0
+    override fun onTouch(v: View, ev: MotionEvent): Boolean {
+        val lp = app.ovLp ?: return false
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                sx = ev.rawX; sy = ev.rawY
+                ox = lp.x; oy = lp.y; ow = lp.width; oh = lp.height
+            }
+            MotionEvent.ACTION_MOVE -> {
+                app.ovApply(mask, ox, oy, ow, oh, (ev.rawX - sx).toInt(), (ev.rawY - sy).toInt())
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> app.ovDone()
+            else -> { }
+        }
+        return true
+    }
+}
+
+// ═══════════════════════════ keeps the process alive while floating ═══════════════════════════
+class FloatKeepService : Service() {
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val chId = "float_keep"
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.createNotificationChannel(NotificationChannel(chId, "Floating notepad", NotificationManager.IMPORTANCE_LOW))
+        val open = Intent(this, MainActivity::class.java)
+        open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+        val pi = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val n = Notification.Builder(this, chId)
+            .setSmallIcon(android.R.drawable.ic_menu_edit)
+            .setContentTitle("Big Notepad is floating")
+            .setContentText("Tap to return to the full app")
+            .setContentIntent(pi)
+            .setOngoing(true)
+            .build()
+        if (Build.VERSION.SDK_INT >= 34) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        else startForeground(1, n)
+        return START_NOT_STICKY
     }
 }
