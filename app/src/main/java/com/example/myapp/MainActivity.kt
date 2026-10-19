@@ -1355,7 +1355,12 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
 
     fun showKeyboard() {
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-        imm.showSoftInput(this, 0)
+        if (app.overlayOn && !hasWindowFocus()) {
+            // floating window only just became focusable: wait for the window focus, then show the keyboard
+            app.ovWantFocus()
+            postDelayed({ if (hasWindowFocus()) imm.showSoftInput(this, 0) }, 180)
+            postDelayed({ if (hasWindowFocus()) imm.showSoftInput(this, 0) }, 450)
+        } else imm.showSoftInput(this, 0)
     }
 
     override fun onTouchEvent(ev: MotionEvent): Boolean {
@@ -1610,6 +1615,16 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
     }
 
     fun paste() {
+        if (app.overlayOn && !hasWindowFocus()) {
+            // Android only lets a focused window read the clipboard: take focus first, then paste
+            app.ovWantFocus()
+            postDelayed({ pasteNow() }, 160)
+            return
+        }
+        pasteNow()
+    }
+
+    private fun pasteNow() {
         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val clip = cm.primaryClip
         if (clip != null && clip.itemCount > 0) {
@@ -4285,6 +4300,7 @@ class MainActivity : Activity() {
     private var ovAlphaBtn: Button? = null
     private var ovCollapsed = false
     private var ovTyping = true
+    private var ovFocusable = false
     private var ovSavedH = 0
     private var ovAlphaIdx = 0
     private var skipAutoDock = false
@@ -4360,6 +4376,7 @@ class MainActivity : Activity() {
         y = y.coerceIn(0, maxOf(0, sh - dp(40)))
         ovAlphaIdx = sp.getInt("a", 0).coerceIn(0, ovAlphas.size - 1)
         ovTyping = true
+        ovFocusable = false
         ovCollapsed = false
         ovSavedH = h
 
@@ -4386,7 +4403,7 @@ class MainActivity : Activity() {
         val gc = 0xFF4A4A6A.toInt()
         val bTool = mkBtn("▤ Hide UI", gc, cWhite) { setChromeHidden(!uiHidden) }
         ovHideBtn = bTool
-        val bType = mkBtn("⌨ On", 0xFF27AE60.toInt(), cWhite) { ovToggleTyping() }
+        val bType = mkBtn("⌨ Auto", 0xFF27AE60.toInt(), cWhite) { ovToggleTyping() }
         val bAlpha = mkBtn("◐", gc, cWhite) { ovCycleAlpha() }
         val bCol = mkBtn("▁", gc, cWhite) { ovToggleCollapse() }
         val bFull = mkBtn("⤢", 0xFF2980B9.toInt(), cWhite) { exitFloat(true) }
@@ -4421,7 +4438,8 @@ class MainActivity : Activity() {
 
         val lp0 = WindowManager.LayoutParams(
             w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
             PixelFormat.TRANSLUCENT)
         lp0.gravity = Gravity.TOP or Gravity.START
         lp0.x = x
@@ -4448,7 +4466,6 @@ class MainActivity : Activity() {
         ovUpdateAlphaBtn()
         setChromeHidden(sp.getBoolean("hid", false))
         try { startForegroundService(Intent(this, FloatKeepService::class.java)) } catch (e: Exception) { }
-        ui.postDelayed({ cur?.view?.requestFocus() }, 100)
         toast("📌 Floating: drag the title bar to move, drag edges/corners to resize, ⤢ = full app")
         ui.postDelayed({ if (overlayOn) moveTaskToBack(true) }, 300)
     }
@@ -4578,23 +4595,60 @@ class MainActivity : Activity() {
         ovAlphaBtn?.text = "◐ " + Math.round(ovAlphas[ovAlphaIdx] * 100f) + "%"
     }
 
-    /** Typing ON: the window takes the keyboard. Typing OFF: the window stays on top but other apps keep the keyboard. */
-    private fun ovToggleTyping() {
+    /**
+     * Focus handling for the floating window.
+     * The window is NOT focusable by default, so every other app keeps the keyboard, the cursor and the clipboard
+     * (copy in this window, paste in any other app and the reverse both work, also with the mouse).
+     * It becomes focusable only while you touch/click INSIDE it, and gives focus back as soon as you touch/click
+     * anywhere outside it (another app, or another floating notepad).
+     */
+    private fun ovSetFocusable(on: Boolean) {
         val lp = ovLp ?: return
         val f = ovFrame ?: return
-        ovTyping = !ovTyping
-        lp.flags = if (ovTyping) (lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv())
+        if (ovFocusable == on) return
+        ovFocusable = on
+        lp.flags = if (on) (lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv())
         else (lp.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
         try { ovWm?.updateViewLayout(f, lp) } catch (e: Exception) { }
-        ovTypeBtn?.text = if (ovTyping) "⌨ On" else "⌨ Off"
-        ovTypeBtn?.background = roundBg(if (ovTyping) 0xFF27AE60.toInt() else 0xFF7F8C8D.toInt(), 5)
-        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-        if (ovTyping) {
-            cur?.view?.let { it.requestFocus(); it.showKeyboard() }
-            toast("Typing ON: this window uses the keyboard")
+        if (on) {
+            ui.post { cur?.view?.requestFocus() }
         } else {
-            imm.hideSoftInputFromWindow(f.windowToken, 0)
-            toast("Typing OFF: other apps get the keyboard; this window stays on top")
+            try {
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                imm.hideSoftInputFromWindow(f.windowToken, 0)
+            } catch (e: Exception) { }
+        }
+    }
+
+    /** called when a finger / mouse press lands inside the window, or when a paste needs the clipboard */
+    fun ovWantFocus() {
+        if (!overlayOn || !ovTyping) return
+        ovSetFocusable(true)
+    }
+
+    /** called for a press that landed outside the floating window */
+    fun ovOutside(rawX: Float, rawY: Float) {
+        if (!overlayOn || !ovFocusable) return
+        if (Build.VERSION.SDK_INT < 31) {
+            // older Android reports real coordinates also for this app's own popups (selection toolbar): keep focus then
+            val v = cur?.view
+            if (v != null && (v.ancL != v.caretL || v.ancC != v.caretC)) return
+        } else if (rawX != 0f || rawY != 0f) {
+            return // a press on one of our own windows (selection toolbar, dialog): keep focus
+        }
+        ovSetFocusable(false)
+    }
+
+    /** Auto: window takes the keyboard only while you work in it. Off: it never takes the keyboard (pure overlay). */
+    private fun ovToggleTyping() {
+        ovTyping = !ovTyping
+        ovTypeBtn?.text = if (ovTyping) "⌨ Auto" else "⌨ Off"
+        ovTypeBtn?.background = roundBg(if (ovTyping) 0xFF27AE60.toInt() else 0xFF7F8C8D.toInt(), 5)
+        if (ovTyping) {
+            toast("Auto: tap inside to type here; tap another app and it gets the keyboard and paste")
+        } else {
+            ovSetFocusable(false)
+            toast("Off: this window never takes the keyboard; it only stays on top")
         }
     }
 }
@@ -4610,6 +4664,15 @@ class DBuilder(val app: MainActivity) : AlertDialog.Builder(app.dctx()) {
 
 // ═══════════════════════════ floating window root (keys + back) ═══════════════════════════
 class OvFrame(ctx: Context, val app: MainActivity) : LinearLayout(ctx) {
+    override fun dispatchTouchEvent(e: MotionEvent): Boolean {
+        if (e.actionMasked == MotionEvent.ACTION_OUTSIDE) {
+            app.ovOutside(e.rawX, e.rawY)
+            return true
+        }
+        if (e.actionMasked == MotionEvent.ACTION_DOWN) app.ovWantFocus()
+        return super.dispatchTouchEvent(e)
+    }
+
     override fun dispatchKeyEvent(e: KeyEvent): Boolean {
         if (e.keyCode == KeyEvent.KEYCODE_BACK) {
             if (e.action == KeyEvent.ACTION_UP && app.panelOpen()) { app.showPanel(0); return true }
