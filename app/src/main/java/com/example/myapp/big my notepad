@@ -1629,8 +1629,28 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
         val clip = cm.primaryClip
         if (clip != null && clip.itemCount > 0) {
             val s = clip.getItemAt(0).coerceToText(context).toString()
-            if (s.isNotEmpty()) insertText(s, null)
+            if (s.isNotEmpty()) insertKeepView(s)
         }
+    }
+
+    /** insert text (paste) and leave the scroll position exactly where it was, instead of jumping to the end of the pasted text */
+    fun insertKeepView(s: String) {
+        val tl = topLine
+        val tp = topPx
+        val h = hx
+        var sl = caretL
+        var sc = caretC
+        if (hasSel) { val a = selNorm(); sl = a[0]; sc = a[1] }
+        insertText(s, null)
+        // put the cursor back at the START of the pasted text
+        caretL = sl.coerceIn(0, doc.total - 1)
+        caretC = sc.coerceIn(0, doc.getLine(caretL).length)
+        ancL = caretL; ancC = caretC
+        topLine = tl.coerceIn(0, maxOf(0, doc.total - 1))
+        topPx = tp
+        hx = h
+        invalidate()
+        app.onViewChanged(pane)
     }
 
     fun selectAll() {
@@ -1712,7 +1732,11 @@ class EditorView(ctx: Context, val pane: Pane, val app: MainActivity) : View(ctx
     inner class EditConn(v: View) : BaseInputConnection(v, false) {
         override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
             if (composeLen > 0) { deleteBefore(composeLen); composeLen = 0 }
-            if (text != null && text.isNotEmpty()) typeString(text.toString(), false)
+            if (text != null && text.isNotEmpty()) {
+                val ts = text.toString()
+                if (ts.indexOf('\n') >= 0 || ts.length >= 50) insertKeepView(ts)
+                else typeString(ts, false)
+            }
             return true
         }
         override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
